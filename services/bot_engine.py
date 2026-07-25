@@ -80,13 +80,13 @@ async def _maybe_trade_for_user(user_id: int, signal: dict):
     if not allowed:
         return
 
-    account = connector.get_account()
+    account = await connector.get_account()
     lots = risk_manager.position_size(
         balance=account["balance"], risk_percent=settings_row["risk_percent"],
         stop_loss_pips=20, pip_value=10.0,
     )
 
-    result = connector.open_trade(signal["symbol"], signal["direction"], lots)
+    result = await connector.open_trade(signal["symbol"], signal["direction"], lots)
     if not result.get("success"):
         return
 
