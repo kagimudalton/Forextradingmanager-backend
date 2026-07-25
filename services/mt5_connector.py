@@ -1,22 +1,18 @@
 """
 mt5_connector.py
 
-Wraps the official `MetaTrader5` Python package.
+Wraps the MetaApi cloud SDK (https://metaapi.cloud) to get real-time MT5
+account data, positions, prices, and trade execution — from a plain Linux
+host like Render. The old `MetaTrader5` Python package only runs on
+Windows next to a live MT5 terminal, which Render can't do; MetaApi runs
+the terminal in their cloud and exposes it over an async API instead.
 
-IMPORTANT PLATFORM NOTE:
-The `MetaTrader5` package only works on Windows, because it talks to a
-locally-installed MT5 terminal over a native IPC channel. There is no
-official Linux/Mac build. Because of that, this module:
+Falls back to deterministic MOCK data if METAAPI_TOKEN / METAAPI_ACCOUNT_ID
+aren't set, so local development and the rest of the platform keep working
+without a live broker connection.
 
-  1. Tries to `import MetaTrader5` for real use on a Windows host that has
-     the MT5 terminal installed.
-  2. Falls back to a deterministic MOCK data provider if the package or
-     terminal isn't available (e.g. during development on Linux/Mac, or in
-     CI). This keeps the rest of the platform (API, frontend, DB) fully
-     testable without a live broker connection.
-
-Swap MOCK_MODE off by installing `MetaTrader5` on Windows and setting
-MT5_LOGIN / MT5_PASSWORD / MT5_SERVER in your environment (see README).
+Every method here is now `async` — callers (routers, bot_engine, etc.) need
+`await connector.get_account()` instead of `connector.get_account()`.
 """
 from __future__ import annotations
 
@@ -27,48 +23,56 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 try:
-    import MetaTrader5 as mt5  # type: ignore
-    MT5_AVAILABLE = True
+    from metaapi_cloud_sdk import MetaApi  # type: ignore
+    METAAPI_AVAILABLE = True
 except ImportError:
-    mt5 = None
-    MT5_AVAILABLE = False
+    MetaApi = None
+    METAAPI_AVAILABLE = False
 
 
 class MT5Connector:
     def __init__(self):
+        self.token = os.getenv("METAAPI_TOKEN")
+        self.account_id = os.getenv("METAAPI_ACCOUNT_ID")
+        self.mock_mode = not METAAPI_AVAILABLE or not self.token or not self.account_id
+
+        self.api: Optional["MetaApi"] = None
+        self.account = None
+        self.connection = None
         self.connected = False
-        self.login = os.getenv("MT5_LOGIN")
-        self.password = os.getenv("MT5_PASSWORD")
-        self.server = os.getenv("MT5_SERVER")
-        self.mock_mode = not MT5_AVAILABLE or not self.login
 
     # ------------------------------------------------------------------
     # Connection lifecycle
     # ------------------------------------------------------------------
-    def initialize(self) -> bool:
+    async def initialize(self) -> bool:
         if self.mock_mode:
             self.connected = True
             return True
 
-        ok = mt5.initialize()
-        if not ok:
-            return False
+        self.api = MetaApi(token=self.token)
+        self.account = await self.api.metatrader_account_api.get_account(self.account_id)
 
-        if self.login and self.password and self.server:
-            ok = mt5.login(int(self.login), password=self.password, server=self.server)
+        # Make sure the MetaApi-hosted terminal is actually deployed and running
+        if self.account.state not in ("DEPLOYED",):
+            await self.account.deploy()
+        await self.account.wait_connected()
 
-        self.connected = bool(ok)
-        return self.connected
+        self.connection = self.account.get_rpc_connection()
+        await self.connection.connect()
+        await self.connection.wait_synchronized()
 
-    def shutdown(self):
-        if not self.mock_mode and MT5_AVAILABLE:
-            mt5.shutdown()
+        self.connected = True
+        return True
+
+    async def shutdown(self):
+        if not self.mock_mode and self.connection:
+            await self.connection.close()
         self.connected = False
 
     # ------------------------------------------------------------------
     # Account / positions
     # ------------------------------------------------------------------
-    def get_account(self) -> dict:
+    async def get_account(self) -> dict:
         if self.mock_mode:
             return {
                 "balance": 10432.55,
@@ -82,22 +86,20 @@ class MT5Connector:
                 "mock": True,
             }
 
-        info = mt5.account_info()
-        if info is None:
-            raise RuntimeError("MT5 account_info() returned None - not connected")
+        info = await self.connection.get_account_information()
         return {
-            "balance": info.balance,
-            "equity": info.equity,
-            "margin": info.margin,
-            "free_margin": info.margin_free,
-            "margin_level": info.margin_level,
-            "currency": info.currency,
-            "leverage": info.leverage,
-            "server": info.server,
+            "balance": info["balance"],
+            "equity": info["equity"],
+            "margin": info["margin"],
+            "free_margin": info["freeMargin"],
+            "margin_level": info.get("marginLevel", 0),
+            "currency": info["currency"],
+            "leverage": info["leverage"],
+            "server": info.get("server", ""),
             "mock": False,
         }
 
-    def get_positions(self) -> list[dict]:
+    async def get_positions(self) -> list[dict]:
         if self.mock_mode:
             return [
                 {
@@ -120,23 +122,18 @@ class MT5Connector:
                 },
             ]
 
-        positions = mt5.positions_get()
-        if positions is None:
-            return []
-        out = []
-        for p in positions:
-            out.append({
-                "ticket": p.ticket,
-                "symbol": p.symbol,
-                "type": "BUY" if p.type == 0 else "SELL",
-                "volume": p.volume,
-                "open_price": p.price_open,
-                "current_price": p.price_current,
-                "profit": p.profit,
-            })
-        return out
+        positions = await self.connection.get_positions()
+        return [{
+            "ticket": p["id"],
+            "symbol": p["symbol"],
+            "type": p["type"].replace("POSITION_TYPE_", ""),  # e.g. POSITION_TYPE_BUY -> BUY
+            "volume": p["volume"],
+            "open_price": p["openPrice"],
+            "current_price": p["currentPrice"],
+            "profit": p["profit"],
+        } for p in positions]
 
-    def get_history(self, days: int = 30) -> list[dict]:
+    async def get_history(self, days: int = 30) -> list[dict]:
         if self.mock_mode:
             base = datetime.utcnow()
             history = []
@@ -151,39 +148,39 @@ class MT5Connector:
                 })
             return history
 
-        date_from = datetime.now() - timedelta(days=days)
-        deals = mt5.history_deals_get(date_from, datetime.now())
-        if deals is None:
-            return []
+        start_time = datetime.now() - timedelta(days=days)
+        deals = await self.connection.get_deals_by_time_range(start_time, datetime.now())
         return [{
-            "ticket": d.ticket,
-            "symbol": d.symbol,
-            "type": "BUY" if d.type == 0 else "SELL",
-            "volume": d.volume,
-            "profit": d.profit,
-            "closed_at": datetime.fromtimestamp(d.time).isoformat(),
+            "ticket": d["id"],
+            "symbol": d.get("symbol", ""),
+            "type": d.get("type", "").replace("DEAL_TYPE_", ""),
+            "volume": d.get("volume", 0),
+            "profit": d.get("profit", 0),
+            "closed_at": d["time"].isoformat() if hasattr(d["time"], "isoformat") else d["time"],
         } for d in deals]
 
     # ------------------------------------------------------------------
     # Price data
     # ------------------------------------------------------------------
-    def get_rates(self, symbol: str, timeframe: str = "M15", count: int = 100) -> list[dict]:
+    async def get_rates(self, symbol: str, timeframe: str = "M15", count: int = 100) -> list[dict]:
         """Return OHLC candles, newest last."""
         if self.mock_mode:
             return self._mock_rates(symbol, count)
 
-        tf_map = {
-            "M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15,
-            "M30": mt5.TIMEFRAME_M30, "H1": mt5.TIMEFRAME_H1, "H4": mt5.TIMEFRAME_H4,
-            "D1": mt5.TIMEFRAME_D1,
-        }
-        rates = mt5.copy_rates_from_pos(symbol, tf_map.get(timeframe, mt5.TIMEFRAME_M15), 0, count)
-        if rates is None:
-            return []
+        # MetaApi's historical candles endpoint is only guaranteed on G1
+        # infrastructure; if your account is G2 this may raise — in that
+        # case fall back to building candles from get_symbol_price polling,
+        # or ask MetaApi support which tier your account is on.
+        tf_map = {"M1": "1m", "M5": "5m", "M15": "15m", "M30": "30m", "H1": "1h", "H4": "4h", "D1": "1d"}
+        candles = await self.account.get_historical_candles(
+            symbol=symbol, timeframe=tf_map.get(timeframe, "15m"),
+            start_time=datetime.now(), limit=count,
+        )
         return [{
-            "time": int(r["time"]), "open": float(r["open"]), "high": float(r["high"]),
-            "low": float(r["low"]), "close": float(r["close"]), "volume": int(r["tick_volume"]),
-        } for r in rates]
+            "time": int(c["time"].timestamp()) if hasattr(c["time"], "timestamp") else c["time"],
+            "open": c["open"], "high": c["high"], "low": c["low"], "close": c["close"],
+            "volume": c.get("tickVolume", 0),
+        } for c in candles]
 
     def _mock_rates(self, symbol: str, count: int) -> list[dict]:
         seed = sum(ord(c) for c in symbol)
@@ -210,8 +207,8 @@ class MT5Connector:
     # ------------------------------------------------------------------
     # Orders
     # ------------------------------------------------------------------
-    def open_trade(self, symbol: str, direction: str, volume: float,
-                    sl: Optional[float] = None, tp: Optional[float] = None) -> dict:
+    async def open_trade(self, symbol: str, direction: str, volume: float,
+                          sl: Optional[float] = None, tp: Optional[float] = None) -> dict:
         if self.mock_mode:
             price = self._mock_rates(symbol, 1)[0]["close"]
             return {
@@ -220,57 +217,35 @@ class MT5Connector:
                 "price": price, "sl": sl, "tp": tp, "mock": True,
             }
 
-        order_type = mt5.ORDER_TYPE_BUY if direction == "BUY" else mt5.ORDER_TYPE_SELL
-        tick = mt5.symbol_info_tick(symbol)
-        price = tick.ask if direction == "BUY" else tick.bid
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": symbol,
-            "volume": volume,
-            "type": order_type,
-            "price": price,
-            "sl": sl or 0.0,
-            "tp": tp or 0.0,
-            "deviation": 20,
-            "magic": 20260101,
-            "comment": "AI dashboard order",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
-        result = mt5.order_send(request)
+        if direction == "BUY":
+            result = await self.connection.create_market_buy_order(
+                symbol=symbol, volume=volume, stop_loss=sl, take_profit=tp,
+                options={"comment": "AI dashboard order"},
+            )
+        else:
+            result = await self.connection.create_market_sell_order(
+                symbol=symbol, volume=volume, stop_loss=sl, take_profit=tp,
+                options={"comment": "AI dashboard order"},
+            )
+
         return {
-            "success": result.retcode == mt5.TRADE_RETCODE_DONE,
-            "ticket": result.order, "symbol": symbol, "type": direction,
-            "volume": volume, "price": price, "sl": sl, "tp": tp,
-            "retcode": result.retcode, "mock": False,
+            "success": result.get("numericCode") == 0,
+            "ticket": result.get("orderId") or result.get("positionId"),
+            "symbol": symbol, "type": direction, "volume": volume,
+            "sl": sl, "tp": tp,
+            "retcode": result.get("stringCode"), "mock": False,
         }
 
-    def close_trade(self, ticket: int) -> dict:
+    async def close_trade(self, ticket: int) -> dict:
         if self.mock_mode:
             return {"success": True, "ticket": ticket, "mock": True}
 
-        positions = mt5.positions_get(ticket=ticket)
-        if not positions:
-            return {"success": False, "error": "Position not found"}
-        pos = positions[0]
-        close_type = mt5.ORDER_TYPE_SELL if pos.type == 0 else mt5.ORDER_TYPE_BUY
-        tick = mt5.symbol_info_tick(pos.symbol)
-        price = tick.bid if pos.type == 0 else tick.ask
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": pos.symbol,
-            "volume": pos.volume,
-            "type": close_type,
-            "position": ticket,
-            "price": price,
-            "deviation": 20,
-            "magic": 20260101,
-            "comment": "AI dashboard close",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+        result = await self.connection.close_position(position_id=str(ticket))
+        return {
+            "success": result.get("numericCode") == 0,
+            "ticket": ticket,
+            "retcode": result.get("stringCode"),
         }
-        result = mt5.order_send(request)
-        return {"success": result.retcode == mt5.TRADE_RETCODE_DONE, "ticket": ticket, "retcode": result.retcode}
 
 
 # Singleton instance used across the app
