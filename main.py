@@ -46,9 +46,14 @@ def health_check():
 
 
 @app.on_event("startup")
-def startup():
+async def startup():
     init_db()
-    connector.initialize()
+    # connector.initialize() is now async — it connects to MetaApi's cloud
+    # terminal (or drops into mock mode if METAAPI_TOKEN/ACCOUNT_ID aren't
+    # set). This can take a few seconds on first boot while MetaApi deploys
+    # the cloud terminal, so don't be surprised if startup takes a bit longer
+    # than before.
+    await connector.initialize()
     _seed_admin()
 
 
@@ -92,7 +97,7 @@ async def _price_ticker():
         if not ws_manager.active_connections:
             continue
         for s in symbols:
-            candle = connector.get_rates(s, count=1)
+            candle = await connector.get_rates(s, count=1)
             if candle:
                 await ws_manager.broadcast({
                     "event": "price_update",
