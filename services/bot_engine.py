@@ -49,7 +49,7 @@ async def _run_cycle():
     if not active_users:
         return
 
-    signals = ma.analyze_watchlist()
+    signals = await ma.analyze_watchlist()
     if not signals:
         return
     best = signals[0]
