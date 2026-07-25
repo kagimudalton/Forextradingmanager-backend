@@ -22,7 +22,7 @@ def _auth(session_token: str | None = Cookie(default=None)):
 async def scan_market(user=Depends(_auth)):
     results = []
     for symbol in SCANNER_UNIVERSE:
-        analysis = ma.analyze_symbol(symbol)
+        analysis = await ma.analyze_symbol(symbol)
         candles = await connector.get_rates(symbol, count=2)
         change_pct = 0.0
         if len(candles) == 2 and candles[0]["close"]:
