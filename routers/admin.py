@@ -25,14 +25,12 @@ class CreateUserRequest(BaseModel):
 def create_user(payload: CreateUserRequest, admin=Depends(_admin_only)):
     if payload.role not in ("ADMIN", "TRADER", "VIEWER"):
         raise HTTPException(400, "Invalid role")
-
     with get_db() as conn:
         existing = conn.execute(
             "SELECT id FROM users WHERE username = ?", (payload.username,)
         ).fetchone()
         if existing:
             raise HTTPException(400, "Username already exists")
-
         cur = conn.execute(
             "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
             (payload.username, hash_password(payload.password), payload.role),
@@ -42,7 +40,6 @@ def create_user(payload: CreateUserRequest, admin=Depends(_admin_only)):
             "INSERT INTO settings (user_id, risk_percent, max_trades) VALUES (?, 1.0, 5)",
             (new_id,),
         )
-
     log_action(admin["id"], "USER_CREATE", f"created '{payload.username}' as {payload.role}")
     return {"id": new_id, "username": payload.username, "role": payload.role}
 
@@ -95,9 +92,19 @@ def logs(limit: int = 100, admin=Depends(_admin_only)):
 
 
 @router.get("/mt5-status")
-def mt5_status(admin=Depends(_admin_only)):
+async def mt5_status(admin=Depends(_admin_only)):
+    # The new connector no longer exposes a bare .server attribute — server
+    # name only comes back as part of the account info dict, and fetching
+    # that now means a real (awaited) call to MetaApi.
+    server = "N/A"
+    if connector.connected and not connector.mock_mode:
+        try:
+            acct = await connector.get_account()
+            server = acct.get("server", "N/A")
+        except Exception:
+            server = "N/A"
     return {
         "connected": connector.connected,
         "mock_mode": connector.mock_mode,
-        "server": connector.server or "N/A",
+        "server": server,
     }
