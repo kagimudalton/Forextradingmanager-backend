@@ -9,6 +9,7 @@ interface.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import List, Dict
 
 from services.mt5_connector import connector
@@ -133,8 +134,8 @@ def calculate_confidence(closes: List[float], candles: List[Dict]) -> tuple[int,
     return score, direction, reasons
 
 
-def analyze_symbol(symbol: str) -> dict:
-    candles = connector.get_rates(symbol, timeframe="M15", count=100)
+async def analyze_symbol(symbol: str) -> dict:
+    candles = await connector.get_rates(symbol, timeframe="M15", count=100)
     if not candles:
         return {"symbol": symbol, "direction": "HOLD", "confidence": 0, "risk": "UNKNOWN", "reason": ["No data"]}
 
@@ -153,8 +154,12 @@ def analyze_symbol(symbol: str) -> dict:
     }
 
 
-def analyze_watchlist(symbols: List[str] | None = None) -> List[dict]:
+async def analyze_watchlist(symbols: List[str] | None = None) -> List[dict]:
     symbols = symbols or WATCHLIST
-    results = [analyze_symbol(s) for s in symbols]
+    # Run all symbol lookups concurrently rather than one-by-one — each one
+    # is a network call to MetaApi now, not a local mock lookup, so doing
+    # them sequentially would make /api/signals noticeably slow.
+    results = await asyncio.gather(*(analyze_symbol(s) for s in symbols))
+    results = list(results)
     results.sort(key=lambda r: r["confidence"], reverse=True)
     return results
