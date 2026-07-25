@@ -1,5 +1,4 @@
 from fastapi import APIRouter, Cookie, Depends
-
 from services.security import get_current_user
 from services.mt5_connector import connector
 from services import risk_manager
@@ -13,37 +12,33 @@ def _auth(session_token: str | None = Cookie(default=None)):
 
 
 @router.get("/account")
-def account(user=Depends(_auth)):
-    return connector.get_account()
+async def account(user=Depends(_auth)):
+    return await connector.get_account()
 
 
 @router.get("/positions")
-def positions(user=Depends(_auth)):
-    return connector.get_positions()
+async def positions(user=Depends(_auth)):
+    return await connector.get_positions()
 
 
 @router.get("/history")
-def history(days: int = 30, user=Depends(_auth)):
-    return connector.get_history(days=days)
+async def history(days: int = 30, user=Depends(_auth)):
+    return await connector.get_history(days=days)
 
 
 @router.get("/risk-status")
-def risk_status(user=Depends(_auth)):
-    acct = connector.get_account()
-    positions_list = connector.get_positions()
-
+async def risk_status(user=Depends(_auth)):
+    acct = await connector.get_account()
+    positions_list = await connector.get_positions()
     with get_db() as conn:
         row = conn.execute(
             "SELECT risk_percent, max_trades, max_daily_loss_percent FROM settings WHERE user_id = ?",
             (user["id"],),
         ).fetchone()
-
     risk_percent = row["risk_percent"] if row else 1.0
     max_trades = row["max_trades"] if row else 5
     max_daily_loss = row["max_daily_loss_percent"] if row else 5.0
-
     today_loss = sum(p["profit"] for p in positions_list if p["profit"] < 0)
-
     return risk_manager.risk_status(
         balance=acct["balance"], equity=acct["equity"],
         open_trades=len(positions_list), max_trades=max_trades,
