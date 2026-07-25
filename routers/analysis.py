@@ -1,4 +1,5 @@
 import json
+
 from fastapi import APIRouter, Cookie, Depends
 
 from services.security import get_current_user
@@ -15,8 +16,7 @@ def _auth(session_token: str | None = Cookie(default=None)):
 
 @router.post("/analyze")
 async def analyze(user=Depends(_auth)):
-    results = market_analyzer.analyze_watchlist()
-
+    results = await market_analyzer.analyze_watchlist()
     with get_db() as conn:
         for r in results:
             conn.execute(
@@ -25,7 +25,6 @@ async def analyze(user=Depends(_auth)):
                 (r["symbol"], r["direction"], r["confidence"], r["risk"], json.dumps(r["reason"])),
             )
     log_action(user["id"], "ANALYZE_MARKETS", f"{len(results)} symbols analyzed")
-
     await broadcast({"event": "analysis_complete", "data": results})
     return results
 
