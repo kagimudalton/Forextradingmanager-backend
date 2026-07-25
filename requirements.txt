@@ -2,6 +2,7 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 pydantic==2.9.2
 python-multipart==0.0.9
+metaapi-cloud-sdk
 
 # Windows-only, optional: enables real MT5 connectivity.
 # Install this ONLY on the Windows box that also runs the MT5 terminal.
