@@ -51,7 +51,7 @@ async def _execute_trade(payload: TradeRequest, direction: str, user: dict):
     if not allowed:
         raise HTTPException(400, reason)
 
-    result = connector.open_trade(payload.symbol, direction, payload.volume, payload.sl, payload.tp)
+    result = await connector.open_trade(payload.symbol, direction, payload.volume, payload.sl, payload.tp)
     if not result.get("success"):
         raise HTTPException(400, f"Order failed: {result}")
 
@@ -72,7 +72,7 @@ class CloseRequest(BaseModel):
 
 @router.post("/trade/close")
 async def trade_close(payload: CloseRequest, user=Depends(_auth)):
-    result = connector.close_trade(payload.ticket)
+    result = await connector.close_trade(payload.ticket)
     if not result.get("success"):
         raise HTTPException(400, f"Close failed: {result}")
 
