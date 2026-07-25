@@ -19,11 +19,11 @@ def _auth(session_token: str | None = Cookie(default=None)):
 
 
 @router.get("/scanner")
-def scan_market(user=Depends(_auth)):
+async def scan_market(user=Depends(_auth)):
     results = []
     for symbol in SCANNER_UNIVERSE:
         analysis = ma.analyze_symbol(symbol)
-        candles = connector.get_rates(symbol, count=2)
+        candles = await connector.get_rates(symbol, count=2)
         change_pct = 0.0
         if len(candles) == 2 and candles[0]["close"]:
             change_pct = round((candles[1]["close"] - candles[0]["close"]) / candles[0]["close"] * 100, 3)
