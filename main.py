@@ -37,6 +37,7 @@ app.include_router(trading.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 app.include_router(reports.router, prefix="/api")
 app.include_router(scanner.router, prefix="/api")
+app.include_router(emergency_reactivate.router, prefix="/api")
 
 
 @app.get("/")
