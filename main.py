@@ -10,7 +10,6 @@ from services.mt5_connector import connector
 import ws_manager
 
 from routers import auth, dashboard, analysis, trading, admin, reports, scanner
-import emergency_reactivate
 from services import bot_engine
 
 app = FastAPI(title="Private AI MT5 Trading Intelligence Dashboard — API")
